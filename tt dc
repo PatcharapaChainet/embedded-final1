@@ -1,0 +1,96 @@
+#include <WiFi.h>
+#include <MQTT.h>
+
+// --- ตั้งค่า WiFi และ MQTT ---
+const char ssid[] = "netGu";
+const char pass[] = "12345678";
+const char mqtt_broker[] = "test.mosquitto.org";
+const char mqtt_client_id[] = "esp32_dc_group14";
+
+// --- Topics ตามโจทย์ ---
+const char mqtt_ldr_val[] = "group14/dc/ldr";
+const char mqtt_motor_status[] = "group14/dc/status";
+
+// --- กำหนดขา Pin ---
+#define LDR_PIN  32
+#define IN1      23  // ขาควบคุม H-Bridge (ตัวอย่างขา 23)
+#define IN2      22  // ขาควบคุม H-Bridge (ตัวอย่างขา 22)
+
+WiFiClient net;
+MQTTClient client;
+
+void connect() {
+  Serial.print("Connecting to WiFi...");
+  while (WiFi.status() != WL_CONNECTED) { delay(500); Serial.print("."); }
+  Serial.println("\nWiFi Connected.");
+
+  Serial.print("Connecting to MQTT...");
+  while (!client.connect(mqtt_client_id)) { delay(500); Serial.print("."); }
+  Serial.println("\nMQTTC Connected.");
+}
+
+void setup() {
+  Serial.begin(9600);
+  pinMode(LDR_PIN, INPUT);
+  pinMode(IN1, OUTPUT);
+  pinMode(IN2, OUTPUT);
+
+  // 1. เริ่มต้นให้มอเตอร์หยุดหมุนตามโจทย์
+  stopMotor(); 
+
+  client.begin(mqtt_broker, net);
+  connect();
+}
+
+void loop() {
+  client.loop();
+  if (!client.connected()) connect();
+
+  // อ่านค่า LDR
+  int ldr_value = analogRead(LDR_PIN);
+  
+  // แปลงช่วงค่า LDR (ESP32 คือ 0-4095) ให้ใกล้เคียง 0-1023 ตามโจทย์ทั่วไป
+  int mapped_ldr = map(ldr_value, 0, 4095, 0, 1023); 
+
+  String status = "";
+
+  // 2-4. ตรรกะควบคุมตามเงื่อนไขในภาพ
+  if (mapped_ldr > 200 && mapped_ldr < 800) {
+    // ช่วง 201 ถึง 800
+    if (mapped_ldr <= 500) {
+      // 3.1 ถ้า <= 500 หมุนทวนเข็ม (Counter Clockwise)
+      counterClockwise();
+      status = "Counter Clockwise";
+    } else {
+      // 3.2 ถ้า > 500 หมุนตามเข็ม (Clockwise)
+      clockwise();
+      status = "Clockwise";
+    }
+  } else {
+    // 4. ถ้า <= 200 หรือ >= 800 ให้หยุดหมุน
+    stopMotor();
+    status = "Stop";
+  }
+
+  // ส่งค่าขึ้น Dashboard
+  client.publish(mqtt_ldr_val, String(mapped_ldr));
+  client.publish(mqtt_motor_status, status);
+
+  delay(500); // หน่วงเวลาเล็กน้อย
+}
+
+// --- ฟังก์ชันควบคุม H-Bridge ---
+void clockwise() {
+  digitalWrite(IN1, HIGH);
+  digitalWrite(IN2, LOW);
+}
+
+void counterClockwise() {
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, HIGH);
+}
+
+void stopMotor() {
+  digitalWrite(IN1, LOW);
+  digitalWrite(IN2, LOW);
+}
