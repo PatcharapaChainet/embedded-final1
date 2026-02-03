@@ -1,0 +1,123 @@
+#include <WiFi.h>
+#include <MQTT.h>
+
+// --- ข้อมูลการเชื่อมต่อเครือข่ายและ Broker ---
+const char ssid[] = "@JumboPlusIoT";      // ชื่อ WiFi ที่ใช้เชื่อมต่อ
+const char pass[] = "123456789";          // รหัสผ่าน WiFi
+const char mqtt_broker[] = "test.mosquitto.org"; // ที่อยู่ Server MQTT
+const char mqtt_client_id[] = "nongmarth1108";   // ID ของอุปกรณ์ (ดูจากตารางที่คุณลงทะเบียนไว้)
+int MQTT_PORT = 1883;                     // พอร์ตมาตรฐานของ MQTT
+
+// --- รายชื่อหัวข้อ (Topics) สำหรับสื่อสารกับ Dashboard ---
+const char mqtt_statusLED_1[] = "group9/ex1/statusLED_1"; // ส่งสถานะ On/Off ของมอเตอร์
+const char mqtt_mode[]        = "group9/ex1/mode";        // รับคำสั่งเปลี่ยนโหมด Auto/Manual
+const char mqtt_statusLED_2[] = "group9/ex1/statusLED_2"; // ส่งชื่อโหมดปัจจุบันไปแสดงผล
+const char mqtt_ldr[]         = "group14/test1/ldr";         // ส่งค่าแสง (LDR) ไปแสดงผล
+const char mqtt_motor[]       = "group9/ex1/motor";       // รับคำสั่งเปิด/ปิดมอเตอร์ในโหมด Manual
+
+// --- กำหนดขาใช้งาน (Pins) ---
+#define LDR         32  // ขา Analog สำหรับอ่านค่าแสง
+#define LED_1       26  // ขา Digital สำหรับไฟสถานะ 1
+#define LED_2       27  // ขา Digital สำหรับไฟสถานะ 2
+#define transister  22  // ขาควบคุมทรานซิสเตอร์เพื่อเปิด/ปิดมอเตอร์
+
+#define LDR_TH 300      // ค่าระดับแสงที่ใช้ตัดสินใจ (Threshold)
+
+WiFiClient net;
+MQTTClient client;
+
+// --- ตัวแปรสถานะ ---
+bool autoMode = true;      // สถานะโหมด: true = อัตโนมัติ, false = แมนนวล
+bool motorState = false;   // สถานะมอเตอร์: true = หมุน, false = หยุด
+bool autoStarted = false;  // ใช้เช็คการเริ่มต้นโหมด Auto ใหม่
+int ldr_value = 0;         // ตัวแปรเก็บค่าแสงที่อ่านได้
+
+// --- ฟังก์ชันรับคำสั่งจาก MQTT Dashboard ---
+void messageReceived(String &topic, String &payload) 
+{ 
+  // ถ้าได้รับคำสั่งเปลี่ยนโหมด
+  if (topic == mqtt_mode) { 
+    autoMode = !autoMode;      // สลับโหมด Auto <-> Manual
+    autoStarted = false;       // รีเซ็ตการเริ่ม Auto
+    Serial.println("incoming: " + topic + " - " + payload);  
+  } 
+  // ถ้าได้รับคำสั่งคุมมอเตอร์ (ต้องไม่อยู่ในโหมด Auto)
+  if (topic == mqtt_motor && !autoMode) {  
+    motorState = !motorState;  // สลับสถานะมอเตอร์ On <-> Off
+    Serial.println("incoming: " + topic + " - " + payload);  
+  } 
+}
+
+// --- ฟังก์ชันจัดการการเชื่อมต่อ ---
+void connect() {
+  Serial.print("checking wifi..."); 
+  while (WiFi.status() != WL_CONNECTED) { delay(500); Serial.print("."); }
+  Serial.print("\nconnecting..."); 
+  while (!client.connect(mqtt_client_id)) { delay(500); Serial.print("."); }
+  Serial.println("\nconnected!");   
+  
+  // ติดตามหัวข้อที่ต้องการรับคำสั่ง
+  client.subscribe(mqtt_mode);
+  client.subscribe(mqtt_motor);
+}
+
+void setup() {
+  Serial.begin(9600);
+  WiFi.begin(ssid, pass);
+  client.onMessage(messageReceived); // กำหนดฟังก์ชันเมื่อมีข้อความเข้า
+  
+  pinMode(transister, OUTPUT); // ตั้งขาคุมมอเตอร์เป็น Output
+  pinMode(LED_1, OUTPUT);      // ตั้งขา LED 1 เป็น Output
+  pinMode(LED_2, OUTPUT);      // ตั้งขา LED 2 เป็น Output (แก้ไขจากต้นฉบับที่เป็น LED_1 ซ้ำ)
+
+  client.begin(mqtt_broker, MQTT_PORT, net);
+  connect();
+}
+
+void loop() {
+  client.loop(); // รักษาการเชื่อมต่อ MQTT
+  if (!client.connected()) connect();
+
+  /* ===== 1. อ่านค่าจากเซนเซอร์แสง ===== */
+  ldr_value = analogRead(LDR); // อ่านค่า ADC จากขา 32
+
+  /* ===== 2. ตรรกะควบคุมโหมดอัตโนมัติ (Auto Mode) ===== */
+  if (autoMode) {
+    if (!autoStarted) {
+      motorState = true;     // เมื่อเข้าโหมด Auto ให้มอเตอร์เริ่มทำงานก่อน
+      autoStarted = true;
+    }
+    // ถ้าค่าแสงสว่างเกินเกณฑ์ที่ตั้งไว้
+    if (ldr_value > LDR_TH) {
+      motorState = true;     // มอเตอร์ทำงาน
+    } else {
+      motorState = false;    // มอเตอร์หยุด
+    }
+  } 
+  else {
+    // ถ้าออกจากโหมด Auto ให้หยุดมอเตอร์ชั่วคราวเพื่อรอคำสั่ง Manual
+    if(autoStarted){
+      motorState = false;
+      autoStarted = false;    
+    }
+  }
+
+  /* ===== 3. สั่งงานอุปกรณ์จริงตามสถานะ motorState ===== */
+  if (motorState) { 
+    digitalWrite(transister, HIGH); // เปิดมอเตอร์
+    digitalWrite(LED_1, HIGH);      // เปิดไฟ LED 1
+    digitalWrite(LED_2, LOW);       // ปิดไฟ LED 2
+    client.publish(mqtt_statusLED_1, "on"); // แจ้งสถานะ On ไปที่ Dashboard
+  } else {
+    digitalWrite(transister, LOW);  // ปิดมอเตอร์
+    digitalWrite(LED_1, LOW);       // ปิดไฟ LED 1
+    digitalWrite(LED_2, HIGH);      // เปิดไฟ LED 2
+    client.publish(mqtt_statusLED_1, "off"); // แจ้งสถานะ Off ไปที่ Dashboard
+  }
+
+  /* ===== 4. ส่งข้อมูลขึ้น MQTT Dashboard เพื่อแสดงผล ===== */
+  client.publish(mqtt_ldr, String(ldr_value)); // ส่งค่าแสงปัจจุบัน
+  client.publish(mqtt_statusLED_2, autoMode ? "Auto" : "Manual"); // ส่งชื่อโหมดปัจจุบัน
+  
+  delay(200); // หน่วงเวลาเล็กน้อยเพื่อให้ระบบไม่ทำงานหนักเกินไป
+}
