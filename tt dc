@@ -1,43 +1,41 @@
-#include <WiFi.h>
-#include <MQTT.h>
+#include <WiFi.h>      // ไลบรารีสำหรับเชื่อมต่อ WiFi
+#include <MQTT.h>      // ไลบรารีสำหรับการสื่อสารแบบ MQTT
 
-// --- ตั้งค่า WiFi และ MQTT ---
-const char ssid[] = "netGu";
-const char pass[] = "12345678";
-const char mqtt_broker[] = "test.mosquitto.org";
-const char mqtt_client_id[] = "esp32_dc_group14";
+// --- ข้อมูลการเชื่อมต่อ ---
+const char ssid[] = "@JumboPlusIoT";               // ชื่อ WiFi
+const char pass[] = "coolpassword";            // รหัสผ่าน WiFi
+const char mqtt_broker[] = "test.mosquitto.org"; // Broker ตามที่กำหนดในโค้ด
+const char mqtt_client_id[] = "finally"; // ID อุปกรณ์
 
-// --- Topics ตามโจทย์ ---
-const char mqtt_ldr_val[] = "group14/dc/ldr";
-const char mqtt_motor_status[] = "group14/dc/status";
+// --- Topics สำหรับ MQTT Dashboard (ตามโจทย์ข้อ 4) ---
+const char mqtt_ldr[]    = "group14/dc/ldr";    // 4.1 แสดงค่าที่อ่านได้จากเซนเซอร์แสง
+const char mqtt_status[] = "group14/dc/status"; // 4.2 แสดงสถานะ Clockwise, Counter Clockwise, Stop
 
 // --- กำหนดขา Pin ---
-#define LDR_PIN  32
-#define IN1      23  // ขาควบคุม H-Bridge (ตัวอย่างขา 23)
-#define IN2      22  // ขาควบคุม H-Bridge (ตัวอย่างขา 22)
+#define LDR_PIN 32   // ขาต่อเซนเซอร์แสง LDR
+#define IN1     23   // ขาควบคุม H-Bridge ช่องที่ 1
+#define IN2     22   // ขาควบคุม H-Bridge ช่องที่ 2
 
 WiFiClient net;
 MQTTClient client;
 
 void connect() {
-  Serial.print("Connecting to WiFi...");
-  while (WiFi.status() != WL_CONNECTED) { delay(500); Serial.print("."); }
-  Serial.println("\nWiFi Connected.");
-
-  Serial.print("Connecting to MQTT...");
-  while (!client.connect(mqtt_client_id)) { delay(500); Serial.print("."); }
-  Serial.println("\nMQTTC Connected.");
+  Serial.print("Connecting...");
+  while (WiFi.status() != WL_CONNECTED) { delay(500); } // รอการเชื่อมต่อ WiFi
+  while (!client.connect(mqtt_client_id)) { delay(500); } // รอการเชื่อมต่อ MQTT
+  Serial.println("Connected!");
 }
 
 void setup() {
   Serial.begin(9600);
-  pinMode(LDR_PIN, INPUT);
-  pinMode(IN1, OUTPUT);
+  pinMode(IN1, OUTPUT); // ตั้งค่าขา H-Bridge เป็น Output
   pinMode(IN2, OUTPUT);
+  
+  // *** โจทย์ข้อ 3.1: เริ่มต้นให้มอเตอร์หยุดหมุน ***
+  digitalWrite(IN1, LOW); 
+  digitalWrite(IN2, LOW); 
 
-  // 1. เริ่มต้นให้มอเตอร์หยุดหมุนตามโจทย์
-  stopMotor(); 
-
+  WiFi.begin(ssid, pass);
   client.begin(mqtt_broker, net);
   connect();
 }
@@ -46,51 +44,39 @@ void loop() {
   client.loop();
   if (!client.connected()) connect();
 
-  // อ่านค่า LDR
-  int ldr_value = analogRead(LDR_PIN);
+  // อ่านค่าจาก LDR และแปลงเป็นช่วง 0-1023 ตามโจทย์ (ข้อ 3.2)
+  int raw_ldr = analogRead(LDR_PIN);
+  int ldr_adc = map(raw_ldr, 0, 4095, 0, 1023); 
   
-  // แปลงช่วงค่า LDR (ESP32 คือ 0-4095) ให้ใกล้เคียง 0-1023 ตามโจทย์ทั่วไป
-  int mapped_ldr = map(ldr_value, 0, 4095, 0, 1023); 
+  String motorStatus = "";
 
-  String status = "";
-
-  // 2-4. ตรรกะควบคุมตามเงื่อนไขในภาพ
-  if (mapped_ldr > 200 && mapped_ldr < 800) {
-    // ช่วง 201 ถึง 800
-    if (mapped_ldr <= 500) {
-      // 3.1 ถ้า <= 500 หมุนทวนเข็ม (Counter Clockwise)
-      counterClockwise();
-      status = "Counter Clockwise";
-    } else {
-      // 3.2 ถ้า > 500 หมุนตามเข็ม (Clockwise)
-      clockwise();
-      status = "Clockwise";
+  // *** โจทย์ข้อ 3.2 และ 3.3: เงื่อนไขการหมุนในช่วง 201 ถึง 800 ***
+  if (ldr_adc > 200 && ldr_adc < 800) {
+    
+    // ข้อ 3.3.1: ถ้าค่า LDR <= 500 ให้หมุนทวนเข็มนาฬิกา (Counter Clockwise)
+    if (ldr_adc <= 500) {
+      digitalWrite(IN1, LOW); 
+      digitalWrite(IN2, HIGH);
+      motorStatus = "Counter Clockwise";
+    } 
+    // ข้อ 3.3.2: ถ้าค่า LDR > 500 ให้หมุนตามเข็มนาฬิกา (Clockwise)
+    else {
+      digitalWrite(IN1, HIGH); 
+      digitalWrite(IN2, LOW);
+      motorStatus = "Clockwise";
     }
-  } else {
-    // 4. ถ้า <= 200 หรือ >= 800 ให้หยุดหมุน
-    stopMotor();
-    status = "Stop";
+    
+  } 
+  // *** โจทย์ข้อ 3.4: ถ้าค่า LDR <= 200 หรือ >= 800 ให้มอเตอร์หยุดหมุน ***
+  else {
+    digitalWrite(IN1, LOW); 
+    digitalWrite(IN2, LOW);
+    motorStatus = "Stop";
   }
 
-  // ส่งค่าขึ้น Dashboard
-  client.publish(mqtt_ldr_val, String(mapped_ldr));
-  client.publish(mqtt_motor_status, status);
-
-  delay(500); // หน่วงเวลาเล็กน้อย
-}
-
-// --- ฟังก์ชันควบคุม H-Bridge ---
-void clockwise() {
-  digitalWrite(IN1, HIGH);
-  digitalWrite(IN2, LOW);
-}
-
-void counterClockwise() {
-  digitalWrite(IN1, LOW);
-  digitalWrite(IN2, HIGH);
-}
-
-void stopMotor() {
-  digitalWrite(IN1, LOW);
-  digitalWrite(IN2, LOW);
+  // *** โจทย์ข้อ 4: ส่งข้อมูลขึ้น MQTT Dashboard ***
+  client.publish(mqtt_ldr, String(ldr_adc));      // 4.1 ส่งค่าแสง
+  client.publish(mqtt_status, motorStatus);       // 4.2 ส่งสถานะการหมุน
+  
+  delay(500); // หน่วงเวลาเพื่อให้ข้อมูลไม่ส่งถี่เกินไป
 }
