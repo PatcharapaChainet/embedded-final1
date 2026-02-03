@@ -1,0 +1,77 @@
+#include <WiFi.h>      // ใช้สำหรับเชื่อมต่ออินเทอร์เน็ตผ่าน WiFi
+#include <MQTT.h>      // ใช้สำหรับรับ-ส่งข้อมูลกับ MQTT Dashboard
+#include <Stepper.h>   // ใช้สำหรับควบคุมการหมุนของ Stepping Motor
+
+// --- ข้อมูลการเชื่อมต่อ ---
+const char ssid[] = "netGu";               // ชื่อ WiFi
+const char pass[] = "12345678";            // รหัสผ่าน WiFi
+const char mqtt_broker[] = "test.mosquitto.org"; // Server ที่ใช้คุยกับ MQTT Tiles
+const char mqtt_client_id[] = "esp32_step_group14"; // ชื่ออุปกรณ์ (ต้องไม่ซ้ำ)
+
+// --- Topics ที่ต้องตั้งค่าใน MQTT Tiles ---
+const char mqtt_ldr[]   = "group14/step/ldr";   // สำหรับ Tile แสดงค่าแสง (LDR Value)
+const char mqtt_angle[] = "group14/step/angle"; // สำหรับ Tile แสดงองศาสะสม
+const char mqtt_reset[] = "group14/step/reset"; // สำหรับปุ่มรีเซ็ตองศา (ส่งค่า "reset")
+
+#define LDR_PIN 32                            // ขาเซนเซอร์แสง
+const int stepsPerRevolution = 2048;          // จำนวน Step ต่อรอบของมอเตอร์ 28BYJ-48
+Stepper myStepper(stepsPerRevolution, 23, 22, 21, 19); // ขาที่ต่อกับชุดขับมอเตอร์ (IN1, IN3, IN2, IN4)
+
+WiFiClient net;
+MQTTClient client;
+long currentAngle = 0; // ตัวแปรเก็บค่าองศาสะสม
+
+// --- ฟังก์ชันเมื่อมีข้อมูลส่งมาจาก MQTT Tiles (เช่น กดปุ่ม Reset) ---
+void messageReceived(String &topic, String &payload) {
+  if (topic == mqtt_reset && payload == "reset") {
+    currentAngle = 0;  // เมื่อได้รับ "reset" ให้ตั้งค่าองศากลับเป็น 0
+    Serial.println("Angle Reset to 0");
+  }
+}
+
+// --- ฟังก์ชันเชื่อมต่อ WiFi และ MQTT ---
+void connect() {
+  while (WiFi.status() != WL_CONNECTED) { delay(500); } // รอจนกว่า WiFi จะติด
+  while (!client.connect(mqtt_client_id)) { delay(500); } // รอจนกว่า MQTT จะเชื่อมต่อสำเร็จ
+  client.subscribe(mqtt_reset); // ติดตามหัวข้อรีเซ็ตเพื่อรอรับคำสั่ง
+}
+
+void setup() {
+  Serial.begin(9600);
+  WiFi.begin(ssid, pass);
+  myStepper.setSpeed(10); // ตั้งความเร็วหมุน
+  
+  client.begin(mqtt_broker, net);
+  client.onMessage(messageReceived); // ลงทะเบียนฟังก์ชันรับข้อความ
+  connect();
+
+  // *** ส่วนที่ 1: เริ่มต้นให้มอเตอร์หยุดหมุน (โจทย์ข้อ 3.1) ***
+  digitalWrite(23, LOW); digitalWrite(22, LOW);
+  digitalWrite(21, LOW); digitalWrite(19, LOW);
+}
+
+void loop() {
+  client.loop(); // เช็คสถานะการรับ-ส่งข้อมูลกับ MQTT
+  if (!client.connected()) connect(); // ถ้าหลุดให้เชื่อมใหม่
+
+  // อ่านค่าแสงและแปลงช่วงค่าจาก 0-4095 เป็น 0-1023 (โจทย์ข้อ 3.2)
+  int raw_ldr = analogRead(LDR_PIN);
+  int ldr_adc = map(raw_ldr, 0, 4095, 0, 1023);
+
+  // *** ส่วนที่ 2: เงื่อนไขการหมุน (โจทย์ข้อ 3.2, 3.3, 3.4) ***
+  if (ldr_adc > 500) {      
+    // ถ้าแสง > 500: ให้มอเตอร์หมุนอย่างต่อเนื่องทิศทางเดียว
+    myStepper.step(10);     
+    currentAngle += 2;      // สะสมค่าองศาที่เปลี่ยนไป
+  } 
+  else {                    
+    // ถ้าแสง <= 500: ให้มอเตอร์หยุดหมุน (โจทย์ข้อ 3.3)
+    digitalWrite(23, LOW); digitalWrite(22, LOW);
+    digitalWrite(21, LOW); digitalWrite(19, LOW);
+  }
+
+  // *** ส่วนที่ 3: ส่งค่าไปที่ Dashboard (โจทย์ข้อ 4) ***
+  client.publish(mqtt_ldr, String(ldr_adc));      // ส่งค่า LDR Value
+  client.publish(mqtt_angle, String(currentAngle)); // ส่งค่าองศาปัจจุบัน
+  delay(100); 
+}
